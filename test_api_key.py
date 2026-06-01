@@ -2,7 +2,7 @@ from google import genai
 from config.settings import GOOGLE_API_KEY, GEMINI_MODEL
 
 def test_api_key():
-    print("KEY FROM ENV:", GOOGLE_API_KEY)
+    print("KEY FROM ENV:", "set" if GOOGLE_API_KEY.strip() else "missing")
 
     if not GOOGLE_API_KEY or not GOOGLE_API_KEY.strip():
         raise RuntimeError("GOOGLE_API_KEY missing or empty")
