@@ -32,5 +32,8 @@ MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "10"))
 LATEX_TEMPLATE_NAME = "resume_template.tex"
 
 # Google Gemini API settings
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+# Whether to enable AI features at all (lets you run fully offline for testing)
+ENABLE_AI = os.getenv("ENABLE_AI", "true").lower() in ("1", "true", "yes", "on")

@@ -8,14 +8,32 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from pydantic import BaseModel, Field
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.utils.logger import get_logger
+from app.services.ai_client import get_ai_client
 from app.models.job_description import JobDescription
 
 logger = get_logger(__name__)
+
+
+class _JDSchema(BaseModel):
+    """Schema for LLM structured extraction of a job description."""
+    title: str = ""
+    company: str = ""
+    location: str = ""
+    job_type: str = ""
+    required_skills: List[str] = Field(default_factory=list)
+    preferred_skills: List[str] = Field(default_factory=list)
+    required_experience_years: Optional[int] = None
+    required_education: str = ""
+    responsibilities: List[str] = Field(default_factory=list)
+    benefits: List[str] = Field(default_factory=list)
+    keywords: List[str] = Field(default_factory=list)
 
 
 class JDParser:
@@ -77,21 +95,66 @@ class JDParser:
         r"(?i)(computer science|data science|engineering|mathematics|statistics)"
     ]
     
-    def __init__(self):
+    def __init__(self, use_ai: bool = True):
         logger.info("Initializing JDParser")
-    
+        self.use_ai = use_ai
+        self.ai = get_ai_client() if use_ai else None
+
     def parse(self, text: str) -> JobDescription:
+        """Parse job description text into structured format.
+
+        Tries LLM extraction first, falling back to the offline regex parser.
         """
-        Parse job description text into structured format.
-        
-        Args:
-            text: Raw job description text
-            
-        Returns:
-            JobDescription object with parsed information
-        """
+        if not text or not text.strip():
+            raise ValueError("Job description text is empty")
+
         logger.info("Parsing job description")
-        
+
+        if self.use_ai and self.ai is not None and self.ai.available:
+            jd = self._llm_extract(text)
+            if jd is not None:
+                logger.info(f"Parsed JD via AI: {jd.title} at {jd.company}")
+                return jd
+            logger.info("AI JD extraction unavailable/failed; using regex fallback")
+
+        return self._regex_parse(text)
+
+    def _llm_extract(self, text: str) -> Optional[JobDescription]:
+        prompt = f"""Extract the job description below into the provided JSON schema.
+Rules:
+- Copy information verbatim; do not invent requirements.
+- required_skills: hard skills/technologies explicitly required.
+- preferred_skills: "nice to have"/preferred items (must not duplicate required_skills).
+- required_experience_years: integer years if stated, else null.
+- keywords: important ATS terms (skills, tools, role-specific nouns).
+- Leave fields empty if not present.
+
+Job description:
+\"\"\"
+{text}
+\"\"\""""
+        parsed = self.ai.generate_json(prompt, schema=_JDSchema)
+        if parsed is None:
+            return None
+        try:
+            return JobDescription(
+                title=parsed.title, company=parsed.company, location=parsed.location,
+                job_type=parsed.job_type,
+                required_skills=list(parsed.required_skills),
+                preferred_skills=[s for s in parsed.preferred_skills
+                                  if s not in parsed.required_skills],
+                required_experience_years=parsed.required_experience_years,
+                required_education=parsed.required_education,
+                responsibilities=list(parsed.responsibilities),
+                benefits=list(parsed.benefits),
+                keywords=list(parsed.keywords) or list(parsed.required_skills),
+                raw_text=text,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to convert AI JD output: {e}")
+            return None
+
+    def _regex_parse(self, text: str) -> JobDescription:
         jd = JobDescription()
         jd.raw_text = text
         
@@ -159,18 +222,28 @@ class JDParser:
             if title:
                 break
         
-        # Look for company name patterns
+        # Company name: only look in the header block (first ~4 lines) to avoid
+        # false positives like "...deploy models at scale" deeper in the JD.
+        header = "\n".join(lines[:4])
         company_patterns = [
-            r'(?i)(?:at|@)\s+(.+?)(?:\n|$)',
-            r'(?i)(?:company|organization)[:\s]+(.+?)(?:\n|$)',
+            r'(?i)(?:^|\n)\s*(?:company|organization)[:\s]+(.+?)(?:\n|$)',
+            r'(?i)(?:^|\n)\s*(?:at|@)\s+([A-Z][\w.& ]+?)(?:\n|$)',
         ]
-        
         for pattern in company_patterns:
-            match = re.search(pattern, text)
+            match = re.search(pattern, header)
             if match:
                 company = match.group(1).strip()
                 break
-        
+
+        # Otherwise, the line right after the title often holds "Company | Location".
+        if not company and title:
+            for i, line in enumerate(lines[:4]):
+                if line.strip() == title and i + 1 < len(lines):
+                    candidate = re.split(r'\s*[|,]\s*', lines[i + 1].strip())[0].strip()
+                    if candidate and len(candidate) < 60:
+                        company = candidate
+                    break
+
         # If no title found, use first non-empty line
         if not title and lines:
             title = lines[0].strip()

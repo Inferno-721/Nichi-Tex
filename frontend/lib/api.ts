@@ -121,6 +121,19 @@ export interface Recommendation {
   description: string;
 }
 
+// AI-powered enhanced feedback (present when a valid GOOGLE_API_KEY is configured).
+// All fields are optional because the backend omits empty sections.
+export interface EnhancedFeedback {
+  flaws?: string;
+  impact_rewrite?: string;
+  ats_suggestions?: string;
+  professional_summary?: string;
+  experience_upgrade?: string;
+  format_recommendations?: string;
+  tailored_suggestions?: string;
+  cover_letter?: string;
+}
+
 export interface AnalyzeResponse {
   success: boolean;
   scores: AnalysisScores;
@@ -128,6 +141,7 @@ export interface AnalyzeResponse {
   missing_skills: string[];
   recommendations: Recommendation[];
   summary: string;
+  enhanced_feedback?: EnhancedFeedback;
 }
 
 export interface AnalyzeRequest {

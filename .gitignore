@@ -3,4 +3,4 @@ __pycache__/
 *.pyc
 .env
 clod_v2.pdf
-demo.py" | Out-File -FilePath .gitignore -Encoding utf8
+demo.py

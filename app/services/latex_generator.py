@@ -1,18 +1,20 @@
 """
 LaTeX Resume Generator Service
 Generates ATS-optimized LaTeX code from resume data using custom RenderCV template
+With controlled AI enhancement that maintains original tone and content.
 """
 
 import sys
-import re
+import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.utils.logger import get_logger
+from app.services.ai_client import get_ai_client
 from app.models.resume import Resume, PersonalInfo, Education, Experience, Project, Skills
 from app.models.job_description import JobDescription
 from app.models.analysis import MatchAnalysis
@@ -23,7 +25,7 @@ logger = get_logger(__name__)
 class LaTeXGenerator:
     """
     Generates professional LaTeX resume code optimized for ATS.
-    Uses RenderCV-style template.
+    Uses RenderCV-style template with controlled AI enhancement.
     """
     
     # LaTeX special characters that need escaping
@@ -39,9 +41,99 @@ class LaTeXGenerator:
         '^': r'\textasciicircum{}',
     }
     
-    def __init__(self):
+    def __init__(self, enable_ai_enhancement: bool = True):
+        """
+        Initialize LaTeX Generator
+
+        Args:
+            enable_ai_enhancement: Whether to enable AI enhancement (default: True)
+        """
         logger.info("Initializing LaTeXGenerator")
-    
+        self.enable_ai = enable_ai_enhancement
+        self.ai = get_ai_client() if enable_ai_enhancement else None
+        # Cache of enhanced strings: original text -> improved text, populated
+        # by a single batched AI call per generate(). Falls back to identity.
+        self._enhanced: Dict[str, str] = {}
+
+    @property
+    def _ai_active(self) -> bool:
+        return bool(self.enable_ai and self.ai is not None and self.ai.available)
+
+    def _build_enhancement_map(
+        self,
+        resume: Resume,
+        jd: Optional[JobDescription],
+        analysis: Optional[MatchAnalysis],
+    ) -> None:
+        """Enhance every experience bullet and project description in ONE AI call.
+
+        Populates ``self._enhanced`` mapping original->improved text. On any
+        failure the map stays empty and callers transparently use the original
+        text. This replaces the previous design that issued one API call per
+        bullet (dozens of sequential calls per resume).
+        """
+        self._enhanced = {}
+        if not self._ai_active:
+            return
+
+        # Collect all editable strings with stable ids.
+        items: List[dict] = []
+        for ei, exp in enumerate(resume.experience):
+            for bi, bullet in enumerate(exp.responsibilities):
+                if bullet and bullet.strip():
+                    items.append({"id": f"e{ei}_{bi}", "text": bullet,
+                                  "context": f"{exp.title} at {exp.company}"})
+        for pi, proj in enumerate(resume.projects):
+            if proj.description and proj.description.strip():
+                items.append({"id": f"p{pi}", "text": proj.description,
+                              "context": f"Project: {proj.name}"})
+
+        if not items:
+            return
+
+        matched = (analysis.matched_skills[:8] if analysis and analysis.matched_skills else [])
+        missing = (analysis.missing_skills[:5] if analysis and analysis.missing_skills else [])
+        role = jd.title if jd and jd.title else "the target role"
+
+        prompt = f"""You optimize resume bullet points and project descriptions for ATS
+and readability for {role}.
+
+STRICT RULES:
+- PRESERVE every original fact, metric and achievement. Do NOT invent anything.
+- Keep each item roughly the same length (1-2 lines).
+- Start bullets with strong action verbs; remove filler/passive language.
+- Naturally surface relevant skills where truthful: {', '.join(matched) or 'n/a'}.
+- Relate to these target skills only if genuinely applicable: {', '.join(missing) or 'n/a'}.
+
+Return a JSON object mapping each item's "id" to its improved text, e.g.
+{{"e0_0": "improved text", "p0": "improved text"}}.
+Return ONLY the items given; keep ids identical.
+
+Items:
+{json.dumps(items, ensure_ascii=False, indent=2)}"""
+
+        result = self.ai.generate_json(prompt)
+        if not isinstance(result, dict):
+            logger.info("AI enhancement unavailable; using original resume text")
+            return
+
+        by_id = {it["id"]: it["text"] for it in items}
+        for item_id, original in by_id.items():
+            improved = result.get(item_id)
+            if not isinstance(improved, str):
+                continue
+            improved = improved.strip().strip('"').strip("'").strip()
+            # Reject hallucinated/over-long or truncated rewrites.
+            if not improved or not (0.5 * len(original) <= len(improved) <= 1.6 * len(original)):
+                continue
+            self._enhanced[original] = improved
+
+        logger.info(f"AI enhanced {len(self._enhanced)}/{len(items)} resume items in one call")
+
+    def _enhance(self, text: str) -> str:
+        """Return the AI-improved version of ``text`` if available, else original."""
+        return self._enhanced.get(text, text)
+
     def escape_latex(self, text: str) -> str:
         """Escape special LaTeX characters in text"""
         if not text:
@@ -70,15 +162,27 @@ class LaTeXGenerator:
             Complete LaTeX code as string
         """
         logger.info("Generating LaTeX resume")
+
+        # Enhance all bullets/descriptions in a single batched AI call (if enabled).
+        self._build_enhancement_map(resume, jd, analysis)
+
+        # Debug: Log what data we received
+        logger.debug(f"Resume personal_info: {resume.personal_info}")
+        logger.debug(f"Resume education count: {len(resume.education)}")
+        logger.debug(f"Resume experience count: {len(resume.experience)}")
+        logger.debug(f"Resume skills: {resume.skills.all_skills()}")
+        logger.debug(f"Resume projects count: {len(resume.projects)}")
+        logger.debug(f"Resume certifications count: {len(resume.certifications)}")
         
         # Build LaTeX sections
         header = self._generate_header(resume.personal_info)
         personal = self._generate_personal_section(resume.personal_info)
         education = self._generate_education_section(resume.education)
-        experience = self._generate_experience_section(resume.experience)
+        experience = self._generate_experience_section(resume.experience, jd, analysis)
         skills = self._generate_skills_section(resume.skills, jd, analysis)
-        projects = self._generate_projects_section(resume.projects)
+        projects = self._generate_projects_section(resume.projects, jd, analysis)
         certifications = self._generate_certifications_section(resume.certifications)
+        achievements = self._generate_achievements_section(resume.achievements) if hasattr(resume, 'achievements') else ""
         footer = self._generate_footer()
         
         # Combine all sections
@@ -90,6 +194,7 @@ class LaTeXGenerator:
             skills,
             projects,
             certifications,
+            achievements,
             footer
         ])
         
@@ -299,7 +404,15 @@ class LaTeXGenerator:
             # Build highlights
             highlights = []
             if edu.gpa:
-                highlights.append(f"GPA: {edu.gpa}/10.0")
+                # Infer the scale from the value (4.x, 5.x, or 10-point).
+                scale = "10.0" if edu.gpa > 5 else ("5.0" if edu.gpa > 4 else "4.0")
+                highlights.append(f"GPA: {edu.gpa}/{scale}")
+            
+            # Add coursework if available
+            if hasattr(edu, 'coursework') and edu.coursework:
+                coursework_str = ", ".join(edu.coursework[:5])  # Limit to 5 courses
+                highlights.append(f"Coursework: {coursework_str}")
+            
             highlights.extend(edu.achievements)
             
             highlights_tex = ""
@@ -328,12 +441,19 @@ class LaTeXGenerator:
 {entries_text}
 """
     
-    def _generate_experience_section(self, experience: List[Experience]) -> str:
-        """Generate work experience section"""
+    def _generate_experience_section(
+        self, 
+        experience: List[Experience],
+        jd: Optional[JobDescription] = None,
+        analysis: Optional[MatchAnalysis] = None
+    ) -> str:
+        """Generate work experience section with controlled AI enhancement"""
         if not experience:
             return ""
         
+        logger.info(f"Generating experience section for {len(experience)} entries")
         entries = []
+        
         for i, exp in enumerate(experience):
             title = self.escape_latex(exp.title)
             company = self.escape_latex(exp.company)
@@ -348,10 +468,14 @@ class LaTeXGenerator:
             if location:
                 company_line = f"{company} -- {location}"
             
-            # Build highlights from responsibilities
+            # Build highlights from responsibilities - with controlled AI enhancement
             highlights_tex = ""
             if exp.responsibilities:
-                items = "\n                ".join([f"\\item {self.escape_latex(r)}" for r in exp.responsibilities[:6]])
+                enhanced_bullets = [
+                    f"\\item {self.escape_latex(self._enhance(resp))}"
+                    for resp in exp.responsibilities
+                ]
+                items = "\n                ".join(enhanced_bullets)
                 highlights_tex = f"""
         \\vspace{{0.10cm}}
         \\begin{{onecolentry}}
@@ -384,16 +508,21 @@ class LaTeXGenerator:
         jd: Optional[JobDescription] = None,
         analysis: Optional[MatchAnalysis] = None
     ) -> str:
-        """Generate skills section"""
+        """Generate skills section with intelligent categorization"""
         sections = []
         
+        # Get all skills
+        all_skills = skills.all_skills()
+        
+        # If we have JD analysis, prioritize matched skills
+        if analysis and hasattr(analysis, 'matched_skills'):
+            matched = set(analysis.matched_skills)
+            # Reorder to put matched skills first within each category
+            all_skills = sorted(all_skills, key=lambda x: x not in matched)
+        
         # Languages/Programming
-        if skills.languages or skills.technical:
-            langs = skills.languages + [s for s in skills.technical if any(
-                kw in s.lower() for kw in ['python', 'java', 'sql', 'c++', 'javascript', 'r', 'scala']
-            )]
-            if langs:
-                sections.append(f"\\textbf{{Languages:}} {self.escape_latex(', '.join(langs))}")
+        if skills.languages:
+            sections.append(f"\\textbf{{Languages:}} {self.escape_latex(', '.join(skills.languages))}")
         
         # Tools
         if skills.tools:
@@ -403,18 +532,15 @@ class LaTeXGenerator:
         if skills.frameworks:
             sections.append(f"\\textbf{{Frameworks:}} {self.escape_latex(', '.join(skills.frameworks))}")
         
-        # Technical/ML skills
-        ml_skills = [s for s in skills.technical if any(
-            kw in s.lower() for kw in ['machine learning', 'deep learning', 'ai', 'nlp', 'ml', 'data']
-        )]
+        # Machine Learning & AI
+        ml_keywords = ['machine learning', 'deep learning', 'ai', 'nlp', 'ml', 'generative', 'transformers', 'llm']
+        ml_skills = [s for s in skills.technical if any(kw in s.lower() for kw in ml_keywords)]
         if ml_skills:
             sections.append(f"\\textbf{{Machine Learning \\& AI:}} {self.escape_latex(', '.join(ml_skills))}")
         
         # If no categorization worked, just list all
-        if not sections:
-            all_skills = skills.all_skills()
-            if all_skills:
-                sections.append(f"\\textbf{{Skills:}} {self.escape_latex(', '.join(all_skills))}")
+        if not sections and all_skills:
+            sections.append(f"\\textbf{{Skills:}} {self.escape_latex(', '.join(all_skills))}")
         
         if not sections:
             return ""
@@ -430,28 +556,46 @@ class LaTeXGenerator:
         {entries}
 """
     
-    def _generate_projects_section(self, projects: List[Project]) -> str:
-        """Generate projects section"""
+    def _generate_projects_section(
+        self, 
+        projects: List[Project],
+        jd: Optional[JobDescription] = None,
+        analysis: Optional[MatchAnalysis] = None
+    ) -> str:
+        """Generate projects section with controlled AI enhancement"""
         if not projects:
             return ""
         
+        logger.info(f"Generating projects section for {len(projects)} projects")
         entries = []
-        for i, proj in enumerate(projects[:4]):
+        
+        for i, proj in enumerate(projects):
             name = self.escape_latex(proj.name)
             
             url_part = ""
             if proj.url:
                 url_display = proj.url.replace('https://', '').replace('http://', '')
-                url_part = f"""\\href{{{proj.url}}}{{github.com/{url_display}}}"""
+                url_part = f"""\\href{{{proj.url}}}{{{url_display}}}"""
             
-            # Build highlights
-            highlights = proj.highlights or ([proj.description] if proj.description else [])
+            # Build highlights - with controlled enhancement
+            highlights = []
+            
+            # Use the batched-enhanced description if available, else original.
+            if proj.description:
+                highlights.append(self._enhance(proj.description))
+            
+            # Add other highlights as-is
+            if proj.highlights:
+                highlights.extend(proj.highlights)
+            
+            # Add tech stack
             if proj.technologies:
-                highlights.append(f"\\textbf{{Tech Stack:}} {', '.join(proj.technologies)}")
+                tech_list = ', '.join(proj.technologies)
+                highlights.append(f"\\textbf{{Tech Stack:}} {tech_list}")
             
             highlights_tex = ""
             if highlights:
-                items = "\n                ".join([f"\\item {self.escape_latex(h)}" for h in highlights[:4]])
+                items = "\n                ".join([f"\\item {self.escape_latex(h)}" for h in highlights])
                 highlights_tex = f"""
         \\vspace{{0.10cm}}
         \\begin{{onecolentry}}
@@ -482,7 +626,7 @@ class LaTeXGenerator:
         if not certifications:
             return ""
         
-        items = "\n                ".join([f"\\item {self.escape_latex(cert)}" for cert in certifications[:6]])
+        items = "\n                ".join([f"\\item {self.escape_latex(cert)}" for cert in certifications])
         
         return f"""
     \\section{{Certifications}}
@@ -494,11 +638,28 @@ class LaTeXGenerator:
         \\end{{onecolentry}}
 """
     
+    def _generate_achievements_section(self, achievements: List[str]) -> str:
+        """Generate achievements section"""
+        if not achievements:
+            return ""
+        
+        items = "\n                ".join([f"\\item {self.escape_latex(ach)}" for ach in achievements])
+        
+        return f"""
+    \\section{{Achievements}}
+
+        \\begin{{onecolentry}}
+            \\begin{{highlights}}
+                {items}
+            \\end{{highlights}}
+        \\end{{onecolentry}}
+"""
+    
     def _generate_footer(self) -> str:
         """Generate document footer"""
         return r"""
-\end{document}
-"""
+                    \end{document}
+                    """
     
     def save_to_file(self, latex_code: str, output_path: str) -> str:
         """

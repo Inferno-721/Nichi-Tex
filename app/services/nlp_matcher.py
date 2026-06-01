@@ -3,6 +3,7 @@ NLP Matching Service
 Compares resume against job description using transformer models
 """
 
+import re
 import sys
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -88,11 +89,9 @@ class NLPMatcher:
     ) -> Tuple[List[SkillMatch], float]:
         """
         Match resume skills against JD required skills using semantic similarity.
-        
         Args:
             resume_skills: List of skills from resume
             jd_skills: List of skills from job description
-            
         Returns:
             Tuple of (list of SkillMatch objects, overall skill match score)
         """
@@ -148,11 +147,9 @@ class NLPMatcher:
     def analyze(self, resume: Resume, jd: JobDescription) -> MatchAnalysis:
         """
         Perform full analysis of resume against job description.
-        
         Args:
             resume: Parsed resume object
             jd: Parsed job description object
-            
         Returns:
             MatchAnalysis object with all scores and recommendations
         """
@@ -280,15 +277,43 @@ class NLPMatcher:
         
         return float(score)
     
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """Lowercase and strip separators so 'Python 3', 'python-3' and
+        'Python3' compare equal. Keeps alphanumerics only."""
+        return re.sub(r'[\s\-_\./]+', '', text.lower())
+
     def _find_missing_keywords(self, resume: Resume, jd: JobDescription) -> List[str]:
-        """Find JD keywords missing from resume"""
+        """Find JD keywords that are absent from the resume.
+
+        Matching is tolerant of separator/version variations (e.g. 'Node.js'
+        vs 'nodejs', 'CI/CD' vs 'ci cd') by comparing on a normalised form,
+        backed by a plain substring check on the original text.
+        """
         resume_text_lower = resume.get_all_text().lower()
-        missing = []
-        
+        resume_text_norm = self._normalize(resume_text_lower)
+
+        missing: List[str] = []
+        seen_keywords = set()  # Track normalised keywords to avoid duplicates
+
         for keyword in jd.keywords:
-            if keyword.lower() not in resume_text_lower:
+            keyword_lower = keyword.lower().strip()
+            if not keyword_lower:
+                continue
+
+            normalized = self._normalize(keyword_lower)
+            if not normalized or normalized in seen_keywords:
+                continue
+            seen_keywords.add(normalized)
+
+            # Present if either the raw substring or its normalised form appears.
+            present = (
+                keyword_lower in resume_text_lower
+                or normalized in resume_text_norm
+            )
+            if not present:
                 missing.append(keyword)
-        
+
         logger.debug(f"Found {len(missing)} missing keywords")
         return missing[:20]  # Limit to top 20
     

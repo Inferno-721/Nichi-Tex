@@ -81,16 +81,61 @@ export default function AppPage() {
         // For now, we'll prompt user to also provide text, or we can reconstruct from parsed data
         // Store a reconstructed text version
         if (response.success && !resumeText) {
-          // Reconstruct a basic text version from parsed data for API calls
-          const reconstructedText = [
-            response.data.personal_info.name,
-            response.data.personal_info.email,
-            response.data.personal_info.phone,
-            ...response.data.education.map(e => `${e.degree} at ${e.institution}`),
-            ...response.data.experience.map(e => `${e.title} at ${e.company}: ${e.responsibilities.join(' ')}`),
-            ...response.data.skills,
-          ].join('\n');
-          setResumeText(reconstructedText);
+          // Reconstruct a text version from parsed data with section headers
+          // Section headers are required for backend parser to properly detect sections
+          const parts: string[] = [];
+
+          // Personal info section
+          parts.push(response.data.personal_info.name || '');
+          parts.push(response.data.personal_info.email || '');
+          parts.push(response.data.personal_info.phone || '');
+          if (response.data.personal_info.linkedin) parts.push(response.data.personal_info.linkedin);
+          if (response.data.personal_info.github) parts.push(response.data.personal_info.github);
+          parts.push('');
+
+          // Education section with header
+          if (response.data.education.length > 0) {
+            parts.push('Education');
+            response.data.education.forEach(e => {
+              parts.push(`${e.institution}`);
+              parts.push(`${e.degree}${e.gpa ? ` - GPA: ${e.gpa}` : ''}`);
+              parts.push('');
+            });
+          }
+
+          // Experience section with header
+          if (response.data.experience.length > 0) {
+            parts.push('Experience');
+            response.data.experience.forEach(e => {
+              parts.push(`${e.title}`);
+              parts.push(`${e.company}`);
+              e.responsibilities.forEach(r => parts.push(`• ${r}`));
+              parts.push('');
+            });
+          }
+
+          // Skills section with header
+          if (response.data.skills.length > 0) {
+            parts.push('Skills');
+            parts.push(response.data.skills.join(', '));
+            parts.push('');
+          }
+
+          // Projects section with header
+          if (response.data.projects.length > 0) {
+            parts.push('Projects');
+            response.data.projects.forEach(p => parts.push(p));
+            parts.push('');
+          }
+
+          // Certifications section with header
+          if (response.data.certifications.length > 0) {
+            parts.push('Certifications');
+            response.data.certifications.forEach(c => parts.push(`• ${c}`));
+            parts.push('');
+          }
+
+          setResumeText(parts.join('\n'));
         }
       } else {
         response = await parseResumeFromText(resumeText);
@@ -741,8 +786,8 @@ export default function AppPage() {
                                           rec.priority === "high"
                                             ? "destructive"
                                             : rec.priority === "medium"
-                                            ? "warning"
-                                            : "secondary"
+                                              ? "warning"
+                                              : "secondary"
                                         }
                                       >
                                         {rec.priority}

@@ -20,6 +20,7 @@ from app.services.jd_parser import JDParser
 from app.services.nlp_matcher import NLPMatcher
 from app.services.gap_analyzer import GapAnalyzer
 from app.services.latex_generator import LaTeXGenerator
+from app.services.prompt_analyzer import PromptAnalyzer
 
 logger = get_logger(__name__)
 
@@ -34,6 +35,7 @@ class Clod:
     - Analyze match between resume and JD
     - Generate gap analysis and recommendations
     - Generate optimized LaTeX resume
+    - AI-powered feedback using fine-tuned prompts
     """
     
     def __init__(self):
@@ -44,6 +46,7 @@ class Clod:
         self.nlp_matcher = NLPMatcher()
         self.gap_analyzer = GapAnalyzer()
         self.latex_generator = LaTeXGenerator()
+        self.prompt_analyzer = PromptAnalyzer()
         
         logger.info("All services initialized successfully")
     
